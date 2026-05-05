@@ -32,10 +32,11 @@ export default function PublicationsPage() {
     );
   }
 
-  const ready = posts.filter((p) => p.establishmentId === active.id && p.status === 'valide');
-  const scheduled = posts.filter((p) => p.establishmentId === active.id && p.status === 'programme');
-  const published = posts.filter((p) => p.establishmentId === active.id && p.status === 'publie');
-  const accounts = platformAccounts.filter((a) => a.establishmentId === active.id);
+  const activeId = active.id;
+  const ready = posts.filter((p) => p.establishmentId === activeId && p.status === 'valide');
+  const scheduled = posts.filter((p) => p.establishmentId === activeId && p.status === 'programme');
+  const published = posts.filter((p) => p.establishmentId === activeId && p.status === 'publie');
+  const accounts = platformAccounts.filter((a) => a.establishmentId === activeId);
 
   function schedule(postId: string) {
     const p = posts.find((x) => x.id === postId);
@@ -72,7 +73,7 @@ export default function PublicationsPage() {
     const existing = accounts.find((a) => a.platform === platform);
     upsertPlatformAccount({
       id: existing?.id ?? uid('pa'),
-      establishmentId: active.id,
+      establishmentId: activeId,
       platform,
       connected: !existing?.connected,
       handle: existing?.handle,

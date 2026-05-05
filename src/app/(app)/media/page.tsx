@@ -33,6 +33,7 @@ export default function MediaPage() {
     .filter((m) => (filter === 'all' ? true : m.source === filter))
     .sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt));
 
+  const activeId = active.id;
   function onUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     files.forEach((file) => {
@@ -40,7 +41,7 @@ export default function MediaPage() {
       reader.onload = () => {
         const m: MediaFile = {
           id: uid('med'),
-          establishmentId: active.id,
+          establishmentId: activeId,
           url: String(reader.result),
           source: 'upload',
           uploadedAt: nowIso(),
