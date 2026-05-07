@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Image from 'next/image';
 import {
   Check,
+  Eye,
   ImageOff,
   ImagePlus,
   RefreshCw,
@@ -19,6 +20,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { Modal } from '@/components/ui/Modal';
 import { Textarea } from '@/components/ui/Input';
 import { PlatformBadge } from '@/components/ui/Badge';
+import { PostPreviewModal } from '@/components/social-preview/PostPreviewModal';
 import { useAppStore } from '@/lib/store';
 import { formatDateFr, nowIso, uid } from '@/lib/utils';
 import type { MediaFile, Platform, Post } from '@/types';
@@ -39,7 +41,9 @@ export default function ValidationPage() {
     .filter((p) => p.status === 'a-valider');
   const [comments, setComments] = useState<Record<string, string>>({});
   const [pickerPostId, setPickerPostId] = useState<string | null>(null);
+  const [previewPostId, setPreviewPostId] = useState<string | null>(null);
   const editingPost = pickerPostId ? posts.find((p) => p.id === pickerPostId) : null;
+  const previewPost = previewPostId ? posts.find((p) => p.id === previewPostId) : null;
 
   function find(id?: string) {
     return id ? media.find((m) => m.id === id) : null;
@@ -138,16 +142,24 @@ export default function ValidationPage() {
                     onChange={(e) => setComments((c) => ({ ...c, [p.id]: e.target.value }))}
                   />
 
-                  <div className="flex justify-end gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <Button
                       variant="outline"
-                      onClick={() => decideValidation(p.id, 'rejected', comments[p.id])}
+                      onClick={() => setPreviewPostId(p.id)}
                     >
-                      <X size={16} /> Refuser
+                      <Eye size={16} /> Aperçu
                     </Button>
-                    <Button onClick={() => decideValidation(p.id, 'approved', comments[p.id])}>
-                      <Check size={16} /> Valider
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => decideValidation(p.id, 'rejected', comments[p.id])}
+                      >
+                        <X size={16} /> Refuser
+                      </Button>
+                      <Button onClick={() => decideValidation(p.id, 'approved', comments[p.id])}>
+                        <Check size={16} /> Valider
+                      </Button>
+                    </div>
                   </div>
                 </CardBody>
               </Card>
@@ -166,6 +178,15 @@ export default function ValidationPage() {
           updatePost(editingPost.id, { mediaId });
         }}
         onAddMedia={(m) => addMedia(m)}
+      />
+
+      {/* APERÇU SOCIAL — visualise le post comme dans le feed Instagram / Facebook / LinkedIn / Google */}
+      <PostPreviewModal
+        open={!!previewPost}
+        onClose={() => setPreviewPostId(null)}
+        post={previewPost ?? null}
+        establishment={active ?? null}
+        media={media}
       />
     </div>
   );
