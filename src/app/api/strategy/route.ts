@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { buildStrategicContext, generateFullStrategy } from '@/services/strategy';
 
 export const runtime = 'nodejs';
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 export async function POST(req: Request) {
   const body = await req.json();
@@ -30,6 +30,7 @@ export async function POST(req: Request) {
         answers: body.answers,
         startDate: body.startDate ? new Date(body.startDate) : undefined,
         defaultPlatforms: body.defaultPlatforms,
+        skipImages: body.skipImages === true,
       });
       return NextResponse.json(result);
     } catch (err) {

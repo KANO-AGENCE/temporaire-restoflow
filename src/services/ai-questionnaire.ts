@@ -37,19 +37,31 @@ function baseQuestions(establishment: Establishment, watch?: WatchContext): Ques
     });
   }
 
+  if (Array.isArray(establishment.menuItems) && establishment.menuItems.length > 0) {
+    questions.push({
+      id: 'plats-carte',
+      question: 'Plats de la carte à mettre en avant cette semaine ?',
+      type: 'multi' as const,
+      options: establishment.menuItems.slice(0, 60),
+      helper:
+        'Issu de votre carte permanente. Coche uniquement les plats à pousser cette semaine.',
+    });
+  }
+
   questions.push(
     {
       id: 'plat',
-      question: 'Y a-t-il un plat à mettre en avant cette semaine ?',
+      question: 'Autres plats à mettre en avant ou précisions ?',
       type: 'textarea' as const,
       helper: establishment.specialties
-        ? `Spécialités connues: ${establishment.specialties}`
-        : undefined,
+        ? `Spécialités connues: ${establishment.specialties}. Renseigne ici un plat hors-carte, une suggestion du jour, un détail de préparation, etc.`
+        : 'Plat hors-carte, suggestion du jour, détail de préparation, etc.',
     },
     {
       id: 'offre',
-      question: 'Une offre spéciale, un menu ou un prix à pousser ?',
-      type: 'textarea' as const,
+      question: 'Une offre spéciale / promotion à pousser cette semaine ?',
+      type: 'boolean' as const,
+      helper: 'Réponds Oui pour ouvrir un champ et préciser quelle promo (formule midi, menu événementiel, happy hour, prix de lancement…).',
     },
     {
       id: 'evenement-interne',
@@ -105,10 +117,12 @@ export async function generateQuestionnaire(
   const fallback = baseQuestions(establishment, watch);
   if (!openai) return fallback;
 
-  // La question "contexte" est toujours produite localement à partir du watch
-  // (pas de hallucination possible), puis on demande à l'IA d'ajouter 5-7 questions
-  // d'affinage tactique. On ne laisse jamais l'IA générer la liste contextuelle.
+  // Les questions "contexte" (issue de la veille) et "plats-carte" (issue de la carte permanente)
+  // sont toujours produites localement — on ne laisse jamais l'IA les générer car elles dépendent
+  // strictement de données factuelles déjà saisies.
   const contextQuestion = fallback.questions.find((q) => q.id === 'contexte');
+  const platsCarteQuestion = fallback.questions.find((q) => q.id === 'plats-carte');
+  const PROTECTED_IDS = new Set(['contexte', 'plats-carte']);
 
   try {
     const prompt = `Génère 5 à 7 questions d'AFFINAGE TACTIQUE pour préparer la semaine de com d'un restaurant.
@@ -127,6 +141,7 @@ ${watch?.summary ? `Synthèse veille (à titre indicatif uniquement, n'invente p
 
 Règles:
 - Pas de question sur les "événements à intégrer" — c'est déjà couvert par la question contexte gérée à part.
+- Pas de question type "Quels plats de la carte mettre en avant" — c'est déjà couvert par plats-carte.
 - Questions courtes, actionnables, en français.
 - Types autorisés: text, textarea, boolean, choice, multi.
 - Une question "plateformes" en multi avec ["Facebook","Instagram","LinkedIn","Google"] obligatoire en dernier.
@@ -143,11 +158,14 @@ Réponds en JSON: {"questions":[{"id":"slug","question":"...","type":"text|texta
     const json = JSON.parse(res.choices[0]?.message?.content || '{}');
     if (!Array.isArray(json.questions) || json.questions.length === 0) return fallback;
     const aiQuestions = json.questions.filter(
-      (q: { id?: string }) => q?.id !== 'contexte'
+      (q: { id?: string }) => !PROTECTED_IDS.has(String(q?.id ?? ''))
+    );
+    const head = [contextQuestion, platsCarteQuestion].filter(
+      (q): q is NonNullable<typeof q> => !!q
     );
     return {
       ...fallback,
-      questions: contextQuestion ? [contextQuestion, ...aiQuestions] : aiQuestions,
+      questions: [...head, ...aiQuestions],
     };
   } catch {
     return fallback;

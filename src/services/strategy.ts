@@ -1,6 +1,7 @@
 import { getOpenAI, TEXT_MODEL } from '@/lib/openai/client';
 import type {
   Establishment,
+  MediaFile,
   Platform,
   Post,
   PostObjective,
@@ -11,6 +12,7 @@ import type {
 import { generateWatchContext } from './ai-watch';
 import { generateQuestionnaire } from './ai-questionnaire';
 import { generatePost } from './ai-post';
+import { generateImage, pickImageSize } from './ai-image';
 import { uid, nowIso } from '@/lib/utils';
 
 export interface StrategicContext {
@@ -105,10 +107,12 @@ function buildMockPlan(
   platforms: Platform[]
 ): StrategyPlan {
   const dish = answerString(answers, 'plat');
-  const offer = answerString(answers, 'offre');
+  const offerYes = answers['offre'] === true || /oui/i.test(answerString(answers, 'offre'));
+  const offerDetail = answerString(answers, 'offre-detail');
   const event = answerString(answers, 'evenement');
   const angles = answerString(answers, 'angles');
   const reservation = answers['reservation'] === true || /oui/i.test(answerString(answers, 'reservation'));
+  const reservationDetail = answerString(answers, 'reservation-detail');
 
   const day = (n: number) => {
     const d = new Date(startDate);
@@ -133,17 +137,19 @@ function buildMockPlan(
       time: '11:30',
       objective: 'reservation',
       platforms,
-      briefing: `Pousser la réservation — rappeler les horaires et faciliter la prise de contact. Spécialités: ${establishment.specialties ?? '—'}.`,
+      briefing: `Pousser la réservation${reservationDetail ? ` — angle demandé: ${reservationDetail}` : ' — rappeler les horaires et faciliter la prise de contact'}. Spécialités: ${establishment.specialties ?? '—'}.`,
       hookAngle: 'urgence douce',
     });
   }
-  if (offer) {
+  if (offerYes) {
     items.push({
       date: day(2),
       time: '18:30',
       objective: 'offre-speciale',
       platforms,
-      briefing: `Communiquer l'offre: ${offer}. Préciser conditions et durée.`,
+      briefing: offerDetail
+        ? `Communiquer la promotion: ${offerDetail}. Préciser conditions et durée.`
+        : `Communiquer la promotion en cours (à préciser par le restaurateur). Préciser conditions et durée.`,
     });
   }
   if (angles) {
@@ -236,6 +242,24 @@ La semaine doit donc contenir au minimum 1 post LinkedIn et 1 post Google Busine
 ${selectedContext.map((s) => `- ${s}`).join('\n')}`
       : `Aucun élément contextuel sélectionné — base-toi uniquement sur les réponses tactiques.`;
 
+    const selectedDishes = Array.isArray(answers['plats-carte'])
+      ? (answers['plats-carte'] as string[])
+      : [];
+    const freeDish = answerString(answers, 'plat');
+    const dishDirective =
+      selectedDishes.length || freeDish
+        ? `PLATS À METTRE EN AVANT — UNIQUEMENT ceux-ci, dans cet ordre de priorité:
+${selectedDishes.map((d) => `- (carte) ${d}`).join('\n')}${selectedDishes.length && freeDish ? '\n' : ''}${freeDish ? `- (autres / précisions) ${freeDish}` : ''}`
+        : `Aucun plat spécifique demandé — laisse la cuisine au second plan ou exploite seulement les spécialités déclarées dans la fiche établissement.`;
+
+    const offerYes = answers['offre'] === true || /oui/i.test(answerString(answers, 'offre'));
+    const offerDetail = answerString(answers, 'offre-detail');
+    const offerDirective = offerYes
+      ? offerDetail
+        ? `PROMOTION À POUSSER cette semaine: ${offerDetail}. Prévoir au moins 1 publication "offre-speciale" qui la communique avec conditions claires.`
+        : `Promotion active mais non détaillée par le gérant — prévois 1 publication "offre-speciale" générique appuyée sur les offres récurrentes (${establishment.recurringOffers ?? 'à définir'}).`
+      : `Pas de promotion à pousser cette semaine — n'invente AUCUN prix, aucune réduction, aucune formule.`;
+
     const briefing = `Tu es directeur·rice de communication pour le restaurant ci-dessous. Construis un plan éditorial cohérent de 5 à 7 publications pour la semaine, à partir UNIQUEMENT des réponses du gérant et des éléments qu'il a explicitement sélectionnés.
 
 Établissement: ${restaurantBlock}
@@ -243,6 +267,10 @@ ${playbook}
 Saisonnalité (info de fond, à mobiliser quand pertinent): ${watch.seasonality}
 
 ${contextDirective}
+
+${dishDirective}
+
+${offerDirective}
 
 Réponses tactiques du gérant: ${JSON.stringify(answers)}
 ${platformDirective}
@@ -286,6 +314,8 @@ Réponds en JSON: {"summary":"...","items":[{"date":"YYYY-MM-DD","time":"HH:mm",
 export interface FullStrategyResult {
   summary: string;
   posts: Post[];
+  /** Images IA générées en accompagnement des posts (linkées via post.mediaId). */
+  media: MediaFile[];
 }
 
 export async function generateFullStrategy(params: {
@@ -294,6 +324,8 @@ export async function generateFullStrategy(params: {
   answers: AnswerMap;
   startDate?: Date;
   defaultPlatforms?: Platform[];
+  /** Désactive la génération d'images (mode dégradé / debug). Default: false. */
+  skipImages?: boolean;
 }): Promise<FullStrategyResult> {
   if (!params.answers || Object.keys(params.answers).length === 0) {
     throw new Error('Réponses du questionnaire requises avant toute génération.');
@@ -336,5 +368,41 @@ export async function generateFullStrategy(params: {
     });
   }
 
-  return { summary: plan.summary, posts };
+  // Génération des visuels en PARALLÈLE pour ne pas exploser le temps total.
+  // Chaque image est dimensionnée selon les plateformes du post (carré IG/FB,
+  // paysage si LinkedIn / Google seuls).
+  const media: MediaFile[] = [];
+  if (!params.skipImages) {
+    const tasks = posts.map(async (post) => {
+      const size = pickImageSize(post.platforms);
+      const promptText =
+        post.imagePrompt?.trim() ||
+        `${post.visualIdea ?? 'plat phare'} — restaurant ${
+          params.establishment.cuisineType ?? ''
+        } à ${params.establishment.city}, photographie éditoriale food, lumière naturelle, qualité haute`;
+      const result = await generateImage(promptText, { size, quality: 'medium' });
+      const m: MediaFile = {
+        id: uid('med'),
+        establishmentId: params.establishment.id,
+        url: result.url,
+        source: 'ai',
+        prompt: result.prompt,
+        uploadedAt: nowIso(),
+        alt: post.visualIdea,
+      };
+      return { postId: post.id, media: m };
+    });
+    const settled = await Promise.allSettled(tasks);
+    for (const s of settled) {
+      if (s.status !== 'fulfilled') {
+        console.warn('[strategy] image generation rejected:', s.reason);
+        continue;
+      }
+      media.push(s.value.media);
+      const target = posts.find((p) => p.id === s.value.postId);
+      if (target) target.mediaId = s.value.media.id;
+    }
+  }
+
+  return { summary: plan.summary, posts, media };
 }

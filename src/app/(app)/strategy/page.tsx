@@ -3,14 +3,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
+  CalendarDays,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   ClipboardList,
   Lock,
+  Newspaper,
   Radar,
+  RefreshCw,
   Save,
   Sparkles,
+  Utensils,
   Wand2,
 } from 'lucide-react';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -18,10 +20,11 @@ import { Button } from '@/components/ui/Button';
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Input, Textarea } from '@/components/ui/Input';
+import { Modal } from '@/components/ui/Modal';
 import { PlatformBadge } from '@/components/ui/Badge';
 import { useAppStore } from '@/lib/store';
 import { formatDateFr, nowIso, uid } from '@/lib/utils';
-import type { Post, Questionnaire, WatchContext } from '@/types';
+import type { MediaFile, Post, Questionnaire, QuestionnaireQuestion, WatchContext } from '@/types';
 
 type AnswerMap = Record<string, string | string[] | boolean>;
 
@@ -37,6 +40,7 @@ export default function StrategyPage() {
     addQuestionnaire,
     saveAnswers,
     addPosts,
+    addMedia,
   } = useAppStore();
   const active = establishments.find((e) => e.id === activeEstablishmentId);
   const watch = watches.find((w) => w.establishmentId === active?.id);
@@ -48,20 +52,17 @@ export default function StrategyPage() {
   const [draft, setDraft] = useState<AnswerMap>({});
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [strategyResult, setStrategyResult] = useState<{ summary: string; posts: Post[] } | null>(null);
-  const [watchOpen, setWatchOpen] = useState(false);
+  const [strategyResult, setStrategyResult] = useState<{ summary: string; posts: Post[]; media?: MediaFile[] } | null>(null);
+  const [newsOpen, setNewsOpen] = useState(false);
+  const [dishesOpen, setDishesOpen] = useState(false);
 
   useEffect(() => {
     setDraft(lastAnswers?.answers ?? {});
     setSaved(!!lastAnswers);
   }, [lastAnswers?.id]);
 
-  useEffect(() => {
-    if (!active) return;
-    if (!watch || !questionnaire) {
-      void loadContext();
-    }
-  }, [active?.id]);
+  // Pas d'auto-refresh : la veille n'est lancée QUE par action humaine
+  // (clic sur "Lancer la veille" ou "Actualiser").
 
   async function loadContext(force = false) {
     if (!active) return;
@@ -100,11 +101,71 @@ export default function StrategyPage() {
     setSaved(true);
   }
 
-  const answersCount = useMemo(
-    () => Object.values(draft).filter((v) => (Array.isArray(v) ? v.length > 0 : v !== '' && v !== undefined)).length,
-    [draft]
-  );
-  const totalQuestions = questionnaire?.questions.length ?? 0;
+  // Reconstruit toujours `contexte` (issue de la veille) et `plats-carte` (issue de la carte
+  // permanente) à partir de l'état COURANT, pour ne jamais dépendre d'un questionnaire mis en
+  // cache avant que l'établissement ait sa carte ou avant un refresh de veille.
+  const effectiveQuestions = useMemo<QuestionnaireQuestion[]>(() => {
+    if (!questionnaire) return [];
+    const stripped = questionnaire.questions.filter(
+      (q) => q.id !== 'contexte' && q.id !== 'plats-carte'
+    );
+
+    const head: QuestionnaireQuestion[] = [];
+
+    if (watch) {
+      const items = [
+        ...(watch.localEvents ?? []),
+        ...(watch.sportsCulture ?? []),
+        ...(watch.worldDays ?? []),
+        ...(watch.commercialEvents ?? []),
+      ];
+      const seen = new Set<string>();
+      const opts: string[] = [];
+      for (const it of items) {
+        if (!it?.label) continue;
+        const key = `${it.date}|${it.label}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const datePrefix = it.date ? `${it.date} — ` : '';
+        opts.push(`${datePrefix}${it.label}`);
+        if (opts.length >= 14) break;
+      }
+      if (opts.length > 0) {
+        head.push({
+          id: 'contexte',
+          question: 'Éléments contextuels à intégrer dans la com de cette semaine ?',
+          type: 'multi',
+          options: opts,
+          helper:
+            'Issu de la veille. Coche uniquement ce que tu veux exploiter — laisse le reste de côté.',
+        });
+      }
+    }
+
+    if (active && Array.isArray(active.menuItems) && active.menuItems.length > 0) {
+      head.push({
+        id: 'plats-carte',
+        question: 'Plats de la carte à mettre en avant cette semaine ?',
+        type: 'multi',
+        options: active.menuItems.slice(0, 60),
+        helper:
+          'Issu de votre carte permanente. Coche uniquement les plats à pousser cette semaine.',
+      });
+    }
+
+    return [...head, ...stripped];
+  }, [questionnaire, watch, active]);
+
+  const answersCount = useMemo(() => {
+    const validKeys = new Set(effectiveQuestions.map((q) => q.id));
+    return Object.entries(draft).filter(([k, v]) => {
+      // Les clés `${id}-detail` sont des compléments de booléens, pas des questions.
+      if (!validKeys.has(k)) return false;
+      if (Array.isArray(v)) return v.length > 0;
+      return v !== '' && v !== undefined;
+    }).length;
+  }, [draft, effectiveQuestions]);
+  const totalQuestions = effectiveQuestions.length;
   const minRequired = Math.max(3, Math.ceil(totalQuestions * 0.4));
   const canGenerate = saved && answersCount >= minRequired;
 
@@ -129,9 +190,14 @@ export default function StrategyPage() {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || 'Génération impossible');
       }
-      const data: { summary: string; posts: Post[] } = await res.json();
+      const data: { summary: string; posts: Post[]; media?: MediaFile[] } = await res.json();
       setStrategyResult(data);
       addPosts(data.posts);
+      // Les visuels IA viennent en parallèle des posts — on les enregistre dans
+      // la médiathèque pour que la Validation et la page Médiathèque les voient.
+      if (Array.isArray(data.media)) {
+        for (const m of data.media) addMedia(m);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Erreur');
     } finally {
@@ -178,67 +244,36 @@ export default function StrategyPage() {
             </CardTitle>
             <div className="flex items-center gap-2">
               {watch ? (
-                <button
-                  onClick={() => setWatchOpen((v) => !v)}
-                  className="inline-flex items-center gap-1 rounded-lg border border-ink-200 px-2.5 py-1 text-xs hover:bg-ink-50"
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => loadContext(true)}
+                  loading={contextLoading}
                 >
-                  {watchOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  {watchOpen ? 'Réduire' : 'Détails'}
-                </button>
+                  <RefreshCw size={14} /> Actualiser
+                </Button>
               ) : null}
-              <Button size="sm" variant="outline" onClick={() => loadContext(true)} loading={contextLoading}>
-                Actualiser
-              </Button>
             </div>
           </CardHeader>
           <CardBody>
             {!watch ? (
-              <div className="text-sm text-ink-500">
-                {contextLoading ? 'Analyse du contexte en cours…' : 'Lancement automatique de la veille…'}
+              <div className="flex flex-col items-start gap-3 rounded-lg border border-dashed border-ink-200 bg-ink-50/60 p-4">
+                <div className="text-sm text-ink-600">
+                  {contextLoading
+                    ? 'Analyse du contexte en cours…'
+                    : "La veille n'est jamais déclenchée automatiquement — lancez-la quand vous le souhaitez."}
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => loadContext(true)}
+                  loading={contextLoading}
+                  disabled={contextLoading}
+                >
+                  <Radar size={14} /> Lancer la veille
+                </Button>
               </div>
             ) : (
-              <>
-                <p className="text-sm leading-relaxed text-ink-700">{watch.summary}</p>
-                {watchOpen ? (
-                  <div className="mt-4 grid gap-3 md:grid-cols-3">
-                    <div>
-                      <div className="mb-1 text-xs font-semibold uppercase text-ink-500">Tendances</div>
-                      <ul className="space-y-1 text-sm text-ink-700">
-                        {(Array.isArray(watch.nationalTrends) ? watch.nationalTrends : [])
-                          .slice(0, 4)
-                          .map((t, i) => (
-                            <li key={i} className="flex gap-1.5"><span className="text-brand-500">•</span> {t}</li>
-                          ))}
-                      </ul>
-                    </div>
-                    <div>
-                      <div className="mb-1 text-xs font-semibold uppercase text-ink-500">Saisonnalité & journées</div>
-                      <p className="text-sm text-ink-700">{watch.seasonality}</p>
-                      {Array.isArray(watch.worldDays) && watch.worldDays.length > 0 ? (
-                        <ul className="mt-1 space-y-0.5 text-xs text-ink-600">
-                          {watch.worldDays.map((d, i) => (
-                            <li key={i}>· {d.label} {d.date ? `(${d.date})` : ''}</li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </div>
-                    <div>
-                      <div className="mb-1 text-xs font-semibold uppercase text-ink-500">Opportunités</div>
-                      <ul className="space-y-1 text-sm text-ink-700">
-                        {[
-                          ...(Array.isArray(watch.localEvents) ? watch.localEvents : []),
-                          ...(Array.isArray(watch.commercialEvents) ? watch.commercialEvents : []),
-                          ...(Array.isArray(watch.sportsCulture) ? watch.sportsCulture : []),
-                        ]
-                          .slice(0, 5)
-                          .map((d, i) => (
-                            <li key={i} className="flex gap-1.5"><span className="text-brand-500">•</span> {d.label}</li>
-                          ))}
-                      </ul>
-                    </div>
-                  </div>
-                ) : null}
-              </>
+              <p className="text-sm leading-relaxed text-ink-700">{watch.summary}</p>
             )}
           </CardBody>
         </Card>
@@ -264,7 +299,7 @@ export default function StrategyPage() {
               </div>
             ) : (
               <div className="space-y-4">
-                {questionnaire.questions.map((q) => (
+                {effectiveQuestions.map((q) => (
                   <div key={q.id} className="space-y-1.5">
                     <label className="text-sm font-medium text-ink-800">{q.question}</label>
                     {q.helper ? <p className="text-xs text-ink-500">{q.helper}</p> : null}
@@ -282,24 +317,43 @@ export default function StrategyPage() {
                       />
                     )}
                     {q.type === 'boolean' && (
-                      <div className="flex gap-2">
-                        {[
-                          { v: true, l: 'Oui' },
-                          { v: false, l: 'Non' },
-                        ].map(({ v, l }) => (
-                          <button
-                            key={l}
-                            type="button"
-                            onClick={() => update(q.id, v)}
-                            className={`rounded-lg border px-3 py-1.5 text-sm ${
-                              draft[q.id] === v
-                                ? 'border-brand-500 bg-brand-50 text-brand-700'
-                                : 'border-ink-200 hover:bg-ink-50'
-                            }`}
-                          >
-                            {l}
-                          </button>
-                        ))}
+                      <div className="space-y-2">
+                        <div className="flex gap-2">
+                          {[
+                            { v: true, l: 'Oui' },
+                            { v: false, l: 'Non' },
+                          ].map(({ v, l }) => (
+                            <button
+                              key={l}
+                              type="button"
+                              onClick={() => update(q.id, v)}
+                              className={`rounded-lg border px-3 py-1.5 text-sm ${
+                                draft[q.id] === v
+                                  ? 'border-brand-500 bg-brand-50 text-brand-700'
+                                  : 'border-ink-200 hover:bg-ink-50'
+                              }`}
+                            >
+                              {l}
+                            </button>
+                          ))}
+                        </div>
+                        {/* Détail conditionnel — n'apparaît que si la réponse est Oui */}
+                        {draft[q.id] === true ? (
+                          <div className="ml-1 border-l-2 border-brand-200 pl-3">
+                            <Textarea
+                              rows={2}
+                              placeholder={
+                                q.id === 'offre'
+                                  ? 'Quelle promo ? (ex: « -20% sur la formule midi », « menu Saint-Valentin à 49€ », « happy hour 18h-20h », « bouteille offerte dès 4 couverts »…)'
+                                  : 'Précisez (optionnel)…'
+                              }
+                              value={(draft[`${q.id}-detail`] as string) ?? ''}
+                              onChange={(e) =>
+                                update(`${q.id}-detail`, e.target.value)
+                              }
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     )}
                     {q.type === 'choice' && q.options && (
@@ -320,7 +374,73 @@ export default function StrategyPage() {
                         ))}
                       </div>
                     )}
-                    {q.type === 'multi' && q.options && (
+                    {q.type === 'multi' && q.options && q.id === 'contexte' && (
+                      (() => {
+                        const arr = (draft[q.id] as string[]) ?? [];
+                        return (
+                          <div>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => setNewsOpen(true)}
+                            >
+                              <Newspaper size={14} /> Choisir actualité
+                              {arr.length > 0 ? (
+                                <span className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-600 px-1.5 text-[11px] font-semibold text-white">
+                                  {arr.length}
+                                </span>
+                              ) : null}
+                            </Button>
+                            {arr.length > 0 ? (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {arr.map((o) => (
+                                  <span
+                                    key={o}
+                                    className="inline-flex max-w-full items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-xs text-brand-800"
+                                  >
+                                    <span className="truncate">{o}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })()
+                    )}
+                    {q.type === 'multi' && q.options && q.id === 'plats-carte' && (
+                      (() => {
+                        const arr = (draft[q.id] as string[]) ?? [];
+                        return (
+                          <div>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => setDishesOpen(true)}
+                            >
+                              <Utensils size={14} /> Choisir un plat
+                              {arr.length > 0 ? (
+                                <span className="ml-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-600 px-1.5 text-[11px] font-semibold text-white">
+                                  {arr.length}
+                                </span>
+                              ) : null}
+                            </Button>
+                            {arr.length > 0 ? (
+                              <div className="mt-2 flex flex-wrap gap-1.5">
+                                {arr.map((o) => (
+                                  <span
+                                    key={o}
+                                    className="inline-flex max-w-full items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-xs text-brand-800"
+                                  >
+                                    <span className="truncate">{o}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })()
+                    )}
+                    {q.type === 'multi' && q.options && q.id !== 'contexte' && q.id !== 'plats-carte' && (
                       <div className="flex flex-wrap gap-2">
                         {q.options.map((o) => {
                           const arr = (draft[q.id] as string[]) ?? [];
@@ -393,26 +513,48 @@ export default function StrategyPage() {
                 </div>
                 <div className="text-xs font-semibold uppercase text-ink-500">
                   {strategyResult.posts.length} publications créées
+                  {strategyResult.media && strategyResult.media.length > 0 ? (
+                    <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] normal-case font-medium text-violet-700">
+                      <Sparkles size={10} /> {strategyResult.media.length} visuel
+                      {strategyResult.media.length > 1 ? 's' : ''} IA
+                    </span>
+                  ) : null}
                 </div>
                 <div className="space-y-2">
-                  {strategyResult.posts.map((p) => (
-                    <div key={p.id} className="rounded-lg border border-ink-100 p-2.5 text-sm">
-                      <div className="flex items-center justify-between text-xs text-ink-500">
-                        <span className="font-medium text-ink-800">
-                          {formatDateFr(p.date)} · {p.time}
-                        </span>
-                        <span className="capitalize">{p.objective}</span>
+                  {strategyResult.posts.map((p) => {
+                    const visual = p.mediaId
+                      ? strategyResult.media?.find((m) => m.id === p.mediaId)
+                      : null;
+                    return (
+                      <div
+                        key={p.id}
+                        className="flex gap-2.5 rounded-lg border border-ink-100 p-2.5 text-sm"
+                      >
+                        {visual ? (
+                          <div
+                            className="relative h-16 w-16 shrink-0 overflow-hidden rounded-md border border-ink-100 bg-ink-50"
+                            style={{ backgroundImage: `url(${visual.url})`, backgroundSize: 'cover', backgroundPosition: 'center' }}
+                          />
+                        ) : null}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between text-xs text-ink-500">
+                            <span className="font-medium text-ink-800">
+                              {formatDateFr(p.date)} · {p.time}
+                            </span>
+                            <span className="capitalize">{p.objective}</span>
+                          </div>
+                          <div className="mt-1 line-clamp-2 text-ink-700">
+                            {p.versions[0]?.text}
+                          </div>
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            {p.platforms.map((pl) => (
+                              <PlatformBadge key={pl} platform={pl} />
+                            ))}
+                          </div>
+                        </div>
                       </div>
-                      <div className="mt-1 line-clamp-2 text-ink-700">
-                        {p.versions[0]?.text}
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap gap-1">
-                        {p.platforms.map((pl) => (
-                          <PlatformBadge key={pl} platform={pl} />
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <p className="text-xs text-ink-500">
                   Les publications sont automatiquement envoyées en validation. Retrouvez-les dans
@@ -423,6 +565,211 @@ export default function StrategyPage() {
           </CardBody>
         </Card>
       </div>
+
+      {/* POPUP — Choisir actualité (rattaché à la question "contexte" du questionnaire) */}
+      <Modal
+        open={newsOpen}
+        onClose={() => setNewsOpen(false)}
+        title="Choisir les actualités à aborder"
+        size="lg"
+      >
+        {(() => {
+          const contextQuestion = effectiveQuestions.find((q) => q.id === 'contexte');
+          const options = contextQuestion?.options ?? [];
+          const selected = (draft['contexte'] as string[]) ?? [];
+
+          if (options.length === 0) {
+            return (
+              <p className="text-sm text-ink-500">
+                Aucune actualité disponible. Lancez ou actualisez la veille pour alimenter cette liste.
+              </p>
+            );
+          }
+
+          // Reconstitue catégorie + titre + date à partir du watch quand possible,
+          // sinon parse "YYYY-MM-DD — label" en fallback.
+          const categorize = (
+            opt: string
+          ): { category: string; title: string; date: string } => {
+            if (watch) {
+              const buckets: Array<{ cat: string; items: { date: string; label: string }[] }> = [
+                { cat: 'Journée internationale', items: watch.worldDays ?? [] },
+                { cat: 'Événement local', items: watch.localEvents ?? [] },
+                { cat: 'Sport & culture', items: watch.sportsCulture ?? [] },
+                { cat: 'Fête commerciale / férié', items: watch.commercialEvents ?? [] },
+              ];
+              for (const b of buckets) {
+                const hit = b.items.find((it) => {
+                  const datePrefix = it.date ? `${it.date} — ` : '';
+                  return `${datePrefix}${it.label}` === opt;
+                });
+                if (hit) return { category: b.cat, title: hit.label, date: hit.date };
+              }
+            }
+            const idx = opt.indexOf(' — ');
+            if (idx > 0) {
+              return { category: 'Actualité', title: opt.slice(idx + 3), date: opt.slice(0, idx) };
+            }
+            return { category: 'Actualité', title: opt, date: '' };
+          };
+
+          const cards = options.map((opt) => ({ value: opt, ...categorize(opt) }));
+
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-ink-500">
+                <span>{selected.length} sélectionnée{selected.length > 1 ? 's' : ''} sur {options.length}</span>
+                {selected.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => update('contexte', [])}
+                    className="font-medium text-brand-700 hover:underline"
+                  >
+                    Tout désélectionner
+                  </button>
+                ) : null}
+              </div>
+              <div className="grid max-h-[60vh] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
+                {cards.map((c) => {
+                  const checked = selected.includes(c.value);
+                  return (
+                    <button
+                      key={c.value}
+                      type="button"
+                      onClick={() =>
+                        update(
+                          'contexte',
+                          checked
+                            ? selected.filter((x) => x !== c.value)
+                            : [...selected, c.value]
+                        )
+                      }
+                      className={`flex flex-col gap-1.5 rounded-lg border p-3 text-left shadow-sm transition ${
+                        checked
+                          ? 'border-brand-500 bg-brand-50/60 ring-1 ring-brand-200'
+                          : 'border-ink-100 bg-white hover:border-brand-300 hover:shadow'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
+                          <Newspaper size={11} /> {c.category}
+                        </span>
+                        <span
+                          className={`grid h-4 w-4 place-items-center rounded-full border ${
+                            checked
+                              ? 'border-brand-600 bg-brand-600 text-white'
+                              : 'border-ink-300 bg-white'
+                          }`}
+                        >
+                          {checked ? <CheckCircle2 size={12} /> : null}
+                        </span>
+                      </div>
+                      <div className="text-sm font-medium leading-snug text-ink-900">
+                        {c.title}
+                      </div>
+                      {c.date ? (
+                        <div className="mt-auto flex items-center gap-1 text-xs text-ink-500">
+                          <CalendarDays size={12} /> {formatDateFr(c.date)}
+                        </div>
+                      ) : (
+                        <div className="mt-auto text-xs italic text-ink-400">Sans date précise</div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex justify-end pt-1">
+                <Button onClick={() => setNewsOpen(false)}>Valider</Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* POPUP — Choisir un plat (alimenté par la carte permanente de l'établissement) */}
+      <Modal
+        open={dishesOpen}
+        onClose={() => setDishesOpen(false)}
+        title="Choisir un plat à mettre en avant"
+        size="lg"
+      >
+        {(() => {
+          const dishesQuestion = effectiveQuestions.find((q) => q.id === 'plats-carte');
+          const options = dishesQuestion?.options ?? [];
+          const selected = (draft['plats-carte'] as string[]) ?? [];
+
+          if (options.length === 0) {
+            return (
+              <p className="text-sm text-ink-500">
+                Aucun plat enregistré. Renseignez la carte permanente depuis la fiche
+                Établissement, puis relancez la veille pour rafraîchir le questionnaire.
+              </p>
+            );
+          }
+
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-ink-500">
+                <span>{selected.length} sélectionné{selected.length > 1 ? 's' : ''} sur {options.length}</span>
+                {selected.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => update('plats-carte', [])}
+                    className="font-medium text-brand-700 hover:underline"
+                  >
+                    Tout désélectionner
+                  </button>
+                ) : null}
+              </div>
+              <div className="grid max-h-[60vh] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
+                {options.map((dish) => {
+                  const checked = selected.includes(dish);
+                  return (
+                    <button
+                      key={dish}
+                      type="button"
+                      onClick={() =>
+                        update(
+                          'plats-carte',
+                          checked
+                            ? selected.filter((x) => x !== dish)
+                            : [...selected, dish]
+                        )
+                      }
+                      className={`flex flex-col gap-1.5 rounded-lg border p-3 text-left shadow-sm transition ${
+                        checked
+                          ? 'border-brand-500 bg-brand-50/60 ring-1 ring-brand-200'
+                          : 'border-ink-100 bg-white hover:border-brand-300 hover:shadow'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
+                          <Utensils size={11} /> Plat de la carte
+                        </span>
+                        <span
+                          className={`grid h-4 w-4 place-items-center rounded-full border ${
+                            checked
+                              ? 'border-brand-600 bg-brand-600 text-white'
+                              : 'border-ink-300 bg-white'
+                          }`}
+                        >
+                          {checked ? <CheckCircle2 size={12} /> : null}
+                        </span>
+                      </div>
+                      <div className="text-sm font-medium leading-snug text-ink-900">
+                        {dish}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex justify-end pt-1">
+                <Button onClick={() => setDishesOpen(false)}>Valider</Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
     </div>
   );
 }

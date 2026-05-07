@@ -17,7 +17,7 @@ import type {
 } from '@/types';
 import { seedData } from './seed';
 
-const SEED_VERSION = 3;
+const SEED_VERSION = 4;
 
 interface AppState {
   hydrated: boolean;

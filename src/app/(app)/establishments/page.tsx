@@ -1,7 +1,7 @@
 'use client';
 
-import { FormEvent, useState } from 'react';
-import { Building2, Pencil, Plus, Trash2 } from 'lucide-react';
+import { FormEvent, useEffect, useState } from 'react';
+import { Building2, Pencil, Plus, Sparkles, Trash2, Utensils, X } from 'lucide-react';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Button } from '@/components/ui/Button';
 import { Card, CardBody } from '@/components/ui/Card';
@@ -32,6 +32,22 @@ export default function EstablishmentsPage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Establishment | null>(null);
 
+  // Carte permanente — état local du modal (séparé du form non-contrôlé)
+  const [menuItems, setMenuItems] = useState<string[]>([]);
+  const [menuRaw, setMenuRaw] = useState('');
+  const [newDish, setNewDish] = useState('');
+  const [extracting, setExtracting] = useState(false);
+  const [menuError, setMenuError] = useState<string | null>(null);
+
+  // Reset / hydratation à l'ouverture du modal
+  useEffect(() => {
+    if (!open) return;
+    setMenuItems(editing?.menuItems ?? []);
+    setMenuRaw('');
+    setNewDish('');
+    setMenuError(null);
+  }, [open, editing?.id]);
+
   function openCreate() {
     setEditing(null);
     setOpen(true);
@@ -40,6 +56,59 @@ export default function EstablishmentsPage() {
   function openEdit(e: Establishment) {
     setEditing(e);
     setOpen(true);
+  }
+
+  async function extractDishes() {
+    const text = menuRaw.trim();
+    if (!text) {
+      setMenuError('Collez d\'abord le contenu de votre carte ci-dessus.');
+      return;
+    }
+    setExtracting(true);
+    setMenuError(null);
+    try {
+      const res = await fetch('/api/menu/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Extraction impossible');
+      }
+      const data: { dishes: string[] } = await res.json();
+      // Fusion sans doublons (case-insensitive)
+      const seen = new Set(menuItems.map((d) => d.toLowerCase()));
+      const merged = [...menuItems];
+      for (const d of data.dishes ?? []) {
+        const k = d.toLowerCase();
+        if (!seen.has(k)) {
+          seen.add(k);
+          merged.push(d);
+        }
+      }
+      setMenuItems(merged);
+      setMenuRaw('');
+    } catch (err) {
+      setMenuError(err instanceof Error ? err.message : 'Erreur');
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  function addDishManually() {
+    const v = newDish.trim();
+    if (!v) return;
+    if (menuItems.some((d) => d.toLowerCase() === v.toLowerCase())) {
+      setNewDish('');
+      return;
+    }
+    setMenuItems([...menuItems, v]);
+    setNewDish('');
+  }
+
+  function removeDish(idx: number) {
+    setMenuItems(menuItems.filter((_, i) => i !== idx));
   }
 
   function onSubmit(e: FormEvent<HTMLFormElement>) {
@@ -66,6 +135,7 @@ export default function EstablishmentsPage() {
         googleBusiness: String(fd.get('googleBusiness') ?? ''),
       },
       brandGuidelines: String(fd.get('brandGuidelines') ?? ''),
+      menuItems,
     };
     if (editing) {
       updateEstablishment(editing.id, patch);
@@ -233,6 +303,103 @@ export default function EstablishmentsPage() {
           <Input label="Instagram" name="instagram" defaultValue={editing?.socialLinks?.instagram} />
           <Input label="LinkedIn" name="linkedin" defaultValue={editing?.socialLinks?.linkedin} />
           <Input label="Google Business" name="googleBusiness" defaultValue={editing?.socialLinks?.googleBusiness} />
+          {/* CARTE PERMANENTE — paste + extraction IA + édition manuelle */}
+          <div className="md:col-span-2 space-y-3 rounded-xl border border-ink-200 bg-ink-50/40 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="inline-flex items-center gap-2 text-sm font-semibold text-ink-800">
+                <Utensils size={16} className="text-brand-700" /> Carte permanente
+                {menuItems.length > 0 ? (
+                  <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[11px] font-medium text-brand-700">
+                    {menuItems.length} plat{menuItems.length > 1 ? 's' : ''}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            <p className="text-xs text-ink-500">
+              Ces plats alimentent le sélecteur « Choisir un plat » du questionnaire stratégie.
+              Collez le texte de votre carte (PDF, Word, site) puis laissez l&apos;IA extraire,
+              ou ajoutez vos plats manuellement.
+            </p>
+
+            <div className="space-y-2">
+              <Textarea
+                rows={4}
+                placeholder={'Collez ici le texte de votre carte (entrées, plats, desserts)…\nL\'IA extraira automatiquement les noms de plats, sans prix ni description.'}
+                value={menuRaw}
+                onChange={(e) => setMenuRaw(e.target.value)}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] text-ink-500">
+                  {menuRaw.length} / 20 000 caractères
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={extractDishes}
+                  loading={extracting}
+                  disabled={extracting || menuRaw.trim().length === 0}
+                >
+                  <Sparkles size={14} /> Extraire avec l&apos;IA
+                </Button>
+              </div>
+              {menuError ? (
+                <p className="text-xs text-red-600">{menuError}</p>
+              ) : null}
+            </div>
+
+            {/* Ajout manuel */}
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <Input
+                  placeholder="Ajouter un plat manuellement…"
+                  value={newDish}
+                  onChange={(e) => setNewDish(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addDishManually();
+                    }
+                  }}
+                />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addDishManually}
+                disabled={newDish.trim().length === 0}
+              >
+                <Plus size={14} /> Ajouter
+              </Button>
+            </div>
+
+            {/* Liste éditable des plats */}
+            {menuItems.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-ink-200 bg-white px-3 py-2 text-xs italic text-ink-500">
+                Aucun plat enregistré. Collez votre carte ou ajoutez vos plats un à un.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {menuItems.map((dish, i) => (
+                  <span
+                    key={`${dish}-${i}`}
+                    className="inline-flex items-center gap-1 rounded-full border border-ink-200 bg-white px-2 py-1 text-xs text-ink-800"
+                  >
+                    <span className="max-w-[260px] truncate">{dish}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeDish(i)}
+                      className="rounded-full p-0.5 text-ink-400 hover:bg-red-50 hover:text-red-600"
+                      title="Retirer ce plat"
+                    >
+                      <X size={11} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
           <Textarea
             label="Charte / consignes de marque"
             name="brandGuidelines"

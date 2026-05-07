@@ -57,6 +57,8 @@ export interface Establishment {
   specialties?: string;
   recurringOffers?: string;
   recurringEvents?: string;
+  /** Plats de la carte permanente — alimente le sélecteur de plats du questionnaire. */
+  menuItems?: string[];
   socialLinks?: {
     facebook?: string;
     instagram?: string;
